@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from desk.bench import CANDIDATES, Candidate, Row, parse_category, percentile, run_candidate, summarize
+from desk.bench import CANDIDATES, Candidate, Row, parse_category, percentile, prompt, run_candidate, summarize
 from desk.llm import LLMError, Usage
 from desk.stream import StreamResult
 
@@ -79,6 +79,16 @@ def test_summarize_counts_failures_as_errors():
     assert s["взвешенных в месяц, млн"] == pytest.approx(110 * 1000 * 30 / 1e6)
     assert s["цена в месяц, у.е."] == pytest.approx(0.002 * 1000 * 30)
     assert (s["обрезано"], s["сбоев"]) == (1, 1)
+    assert s["ошибки в месяц, у.е."] == pytest.approx(2 / 3 * 1000 * 30 * 2 * 10)
+    assert s["итого в месяц, у.е."] == pytest.approx(s["цена в месяц, у.е."] + s["ошибки в месяц, у.е."])
+
+
+def test_prompt_puts_examples_between_system_and_ticket():
+    cand = Candidate("тест", "постановка", examples=[("вопрос", "другое")])
+    msgs = prompt(cand, {"text": "обращение"})
+    assert [m["role"] for m in msgs] == ["system", "user", "assistant", "user"]
+    assert (msgs[2]["content"], msgs[-1]["content"]) == ("другое", "обращение")
+    assert len(prompt(Candidate("без", "постановка"), {"text": "обращение"})) == 2
 
 
 def test_candidates_are_consistent():

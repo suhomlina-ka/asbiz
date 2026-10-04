@@ -16,7 +16,7 @@ import asyncio
 import datetime
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import RUNS
 from .data import CATEGORIES, tickets
@@ -39,11 +39,26 @@ DETAILED = (
 - другое: всё остальное; при сомнении выбирай «другое»."""
 )
 
+EXAMPLES = [
+    (
+        "Я продавец, выручка за вчерашние продажи так и не поступила на "
+        "расчётный счёт. Когда ждать деньги?",
+        "тарифы",
+    ), # По правилам разметки и примерам вопросы по срокам вывода выручки
+       # относятся к тарифам
+    ("Подскажите, как оформить у вас кредитную карту с кэшбэком?", "другое")
+    # не по теме
+]
+
 # Рассуждение. max_tokens кандидата должен быть больше budget_tokens
 THINKING = {"thinking": {"type": "enabled", "budget_tokens": 1024}}
 
 # Обращений в день для прогноза на месяц
 FLOW_PER_DAY = 50_000
+
+
+ERROR_MINUTES = 2
+MINUTE_COST = 10
 
 
 @dataclass
@@ -52,12 +67,14 @@ class Candidate:
     system: str
     body: Dict[str, Any] = field(default_factory=dict)  # добавка к запросу
     max_tokens: int = 16
+    examples: List[Tuple[str, str]] = field(default_factory=list)  # обращение, ответ
 
 
 CANDIDATES = [
     Candidate("короткая постановка", SHORT),
     Candidate("постановка с правилами", DETAILED),
     Candidate("правила + рассуждение", DETAILED, body=THINKING, max_tokens=2048),
+    Candidate("правила + примеры", DETAILED, examples=EXAMPLES),
 ]
 
 
@@ -75,11 +92,13 @@ class Row:
 
 
 def prompt(cand: Candidate, row: Dict[str, Any]) -> List[Dict[str, str]]:
-    """Постановка кандидата и текст обращения"""
-    return [
-        {"role": "system", "content": cand.system},
-        {"role": "user", "content": row["text"]},
-    ]
+    """Постановка кандидата, разобранные примеры и текст обращения"""
+    messages = [{"role": "system", "content": cand.system}]
+    for text, answer in cand.examples:
+        messages.append({"role": "user", "content": text})
+        messages.append({"role": "assistant", "content": answer})
+    messages.append({"role": "user", "content": row["text"]})
+    return messages
 
 
 def parse_category(text: str) -> Optional[str]:
@@ -129,6 +148,12 @@ async def run_candidate(
     return list(await asyncio.gather(*(one(r) for r in rows)))
 
 
+def errors_cost(rows: List[Row], flow_per_day: int = FLOW_PER_DAY) -> float:
+    """Время операторов на неверно отнесённые обращения за месяц, у.е."""
+    error_rate = sum(not r.ok for r in rows) / max(1, len(rows))
+    return error_rate * flow_per_day * 30 * ERROR_MINUTES * MINUTE_COST
+
+
 def summarize(
     name: str, rows: List[Row], flow_per_day: int = FLOW_PER_DAY
 ) -> Dict[str, Any]:
@@ -154,6 +179,9 @@ def summarize(
         "цена за 1000, у.е.": 1000 * per(total.cost),
         "взвешенных в месяц, млн": per(total.weighted) * flow_per_day * 30 / 1e6,
         "цена в месяц, у.е.": per(total.cost) * flow_per_day * 30,
+        "ошибки в месяц, у.е.": errors_cost(rows, flow_per_day),
+        "итого в месяц, у.е.": per(total.cost) * flow_per_day * 30
+        + errors_cost(rows, flow_per_day),
         "обрезано": sum(r.truncated for r in done),
         "сбоев": len(rows) - len(done),
     }
